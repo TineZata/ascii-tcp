@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let payload = parse_backend_payload(&json)?;
     let context = Context::new(ClientConfig {
         retry_interval: Duration::from_secs(2),
-        retry_forever: false,
+        retry_forever: true,
     });
 
     context.on_connected(|endpoint| println!("connected: {endpoint}"));
@@ -33,6 +33,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("disconnected: {endpoint}: {reason}");
     });
 
-    print_result(context.execute_payload_once(&payload).await?);
+    print_result(context.execute_payload(&payload).await?);
     Ok(())
 }

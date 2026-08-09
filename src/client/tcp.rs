@@ -103,18 +103,11 @@ impl ContextInner {
     }
 
     fn mark_disconnected(&self, endpoint: &str, error: &AsciiTcpError) {
-        let mut should_emit = false;
         if let Ok(mut state) = self.connection_state.lock() {
-            let was_connected = state.get(endpoint).copied();
-            if was_connected.unwrap_or(true) {
-                state.insert(endpoint.to_string(), false);
-                should_emit = true;
-            }
+            state.insert(endpoint.to_string(), false);
         }
-        if should_emit {
-            warn!(endpoint, error = %error, "TCP connection lost");
-            self.emit_disconnected(endpoint.to_string(), error.to_string());
-        }
+        warn!(endpoint, error = %error, "TCP connection attempt failed");
+        self.emit_disconnected(endpoint.to_string(), error.to_string());
     }
 
     fn emit_connected(&self, endpoint: String) {
