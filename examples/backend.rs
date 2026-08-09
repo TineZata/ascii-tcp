@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::time::Duration;
 
-use ascii_tcp::{parse_backend_payload, ClientConfig, CommandResultPayload, Context};
+use ascii_tcp::{parse_backend_payload, CommandResultPayload, Context, ClientConfig};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -42,6 +42,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         error!(%endpoint, %reason, "connection attempt failed");
     });
 
-    print_result(context.execute_payload(&payload).await?);
-    Ok(())
+    loop {
+        match context.execute_payload(&payload).await {
+            Ok(result) => print_result(result),
+            Err(error) => error!(%error, "payload execution failed"),
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }

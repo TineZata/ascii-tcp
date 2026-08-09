@@ -10,6 +10,10 @@ pub struct Context {
 }
 
 impl Context {
+    /// Creates a new `Context` with configuration loaded from environment variables.
+    /// Env variables:
+    /// - `ASCII_TCP_RETRY_MS`: Retry interval in milliseconds (default: 2000)
+    /// - `ASCII_TCP_RETRY_FOREVER`: Whether to retry forever on connection failure (default: true)
     pub fn from_env() -> Self {
         Self {
             inner: ContextInner::new(),
@@ -17,6 +21,7 @@ impl Context {
         }
     }
 
+    /// Creates a new `Context` with the provided `ClientConfig`.
     pub fn new(config: ClientConfig) -> Self {
         Self {
             inner: ContextInner::new(),
@@ -24,6 +29,7 @@ impl Context {
         }
     }
 
+    /// Registers a callback to be called when a connection is established.
     pub fn on_connected<F>(&self, callback: F)
     where
         F: Fn(String) + Send + Sync + 'static,
@@ -31,6 +37,7 @@ impl Context {
         self.inner.on_connected(callback);
     }
 
+    /// Registers a callback to be called when a connection is lost.
     pub fn on_disconnected<F>(&self, callback: F)
     where
         F: Fn(String, String) + Send + Sync + 'static,
@@ -38,6 +45,8 @@ impl Context {
         self.inner.on_disconnected(callback);
     }
 
+    /// Attempts to execute a payload, retrying on connection failure if `retry_forever` is set in the configuration.
+    /// Default retry interval is 2 seconds, but can be configured via `ClientConfig`.
     pub async fn execute_payload(
         &self,
         payload: &Payload,

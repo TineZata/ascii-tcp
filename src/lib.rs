@@ -12,7 +12,7 @@ pub mod client;
 pub mod server;
 
 pub use client::{ClientConfig, Context};
-pub use server::{Server, ServerConfig, ServerHandle};
+pub use server::{AlarmSeverity, AlarmStatus, Server, ServerConfig, ServerHandle, ServerMetadata};
 
 #[derive(Debug, Clone)]
 pub struct AsciiTcpConfig {

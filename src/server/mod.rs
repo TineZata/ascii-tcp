@@ -12,6 +12,10 @@ use tracing::{debug, warn};
 
 use crate::{read_ascii_line, AsciiTcpError, LineEnding};
 
+mod metadata;
+
+pub use metadata::{AlarmSeverity, AlarmStatus, ServerMetadata};
+
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<String, AsciiTcpError>> + Send>>;
 type Handler = Arc<dyn Fn(String, SocketAddr) -> HandlerFuture + Send + Sync>;
 
@@ -21,6 +25,7 @@ pub struct ServerConfig {
     pub io_timeout: Duration,
     pub line_ending: LineEnding,
     pub max_line_length: usize,
+    pub metadata: ServerMetadata,
 }
 
 impl ServerConfig {
@@ -59,6 +64,7 @@ impl Default for ServerConfig {
             io_timeout: Duration::from_secs(2),
             line_ending: LineEnding::Lf,
             max_line_length: 8 * 1024,
+            metadata: ServerMetadata::default(),
         }
     }
 }
