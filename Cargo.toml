@@ -1,0 +1,15 @@
+[package]
+name = "ascii-tcp"
+version = "0.1.0"
+edition = "2021"
+description = "Tokio-based ASCII request/response client over TCP"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tokio = { version = "1", features = ["net", "io-util", "time"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
