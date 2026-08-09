@@ -1,0 +1,28 @@
+{
+  "commands": [
+    {
+      "id": "flow_ascii_tcp",
+      "request": "READ FLOW",
+      "protocol": {
+        "type": "ascii-tcp",
+        "host": "127.0.0.1",
+        "port": 4000,
+        "line_ending": "lf",
+        "connect_timeout_ms": 2000,
+        "io_timeout_ms": 2000
+      }
+    },
+    {
+      "id": "temperature_ascii_tcp",
+      "request": "READ TEMP",
+      "protocol": {
+        "type": "ascii-tcp",
+        "host": "127.0.0.1",
+        "port": 4000,
+        "line_ending": "lf",
+        "connect_timeout_ms": 2000,
+        "io_timeout_ms": 2000
+      }
+    }
+  ]
+}

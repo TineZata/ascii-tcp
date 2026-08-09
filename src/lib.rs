@@ -1,8 +1,18 @@
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::{Mutex, OwnedMutexGuard};
+
+pub mod client;
+pub mod server;
+
+pub use client::{ClientConfig, Context};
+pub use server::{Server, ServerConfig, ServerHandle};
 
 #[derive(Debug, Clone)]
 pub struct AsciiTcpConfig {
@@ -25,7 +35,8 @@ impl Default for AsciiTcpConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LineEnding {
     Lf,
     CrLf,
@@ -33,7 +44,7 @@ pub enum LineEnding {
 }
 
 impl LineEnding {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Lf => "\n",
             Self::CrLf => "\r\n",
@@ -52,38 +63,216 @@ pub enum AsciiTcpError {
     Io(#[from] std::io::Error),
     #[error("connection closed before response")]
     Eof,
+    #[error("invalid protocol type: {0}")]
+    InvalidProtocolType(String),
+    #[error("backend config parse error: {0}")]
+    ConfigParse(#[from] serde_json::Error),
+    #[error("request exceeds maximum line length of {0} bytes")]
+    RequestTooLong(usize),
+    #[error("server task stopped")]
+    ServerStopped,
 }
 
-pub async fn exchange_line(cfg: &AsciiTcpConfig, request: &str) -> Result<String, AsciiTcpError> {
-    let addr = format!("{}:{}", cfg.host, cfg.port);
+impl AsciiTcpError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::ConnectTimeout | Self::IoTimeout | Self::Io(_) | Self::Eof
+        )
+    }
+}
 
-    let stream = tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(&addr))
-        .await
-        .map_err(|_| AsciiTcpError::ConnectTimeout)??;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HardwareProtocol {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub host: String,
+    pub port: u16,
+    pub line_ending: LineEnding,
+    pub connect_timeout_ms: Option<u64>,
+    pub io_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Command {
+    pub id: Option<String>,
+    pub request: String,
+    pub protocol: HardwareProtocol,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CommandResult {
+    pub id: Option<String>,
+    pub response: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BatchCommands {
+    pub commands: Vec<Command>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BatchResult {
+    pub responses: Vec<CommandResult>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Payload {
+    Single(Command),
+    Batch(BatchCommands),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CommandResultPayload {
+    Single(CommandResult),
+    Batch(BatchResult),
+}
+
+impl AsciiTcpConfig {
+    pub fn from_protocol(protocol: &HardwareProtocol) -> Result<Self, AsciiTcpError> {
+        if protocol.kind != "ascii-tcp" {
+            return Err(AsciiTcpError::InvalidProtocolType(protocol.kind.clone()));
+        }
+
+        Ok(Self {
+            host: protocol.host.clone(),
+            port: protocol.port,
+            connect_timeout: Duration::from_millis(protocol.connect_timeout_ms.unwrap_or(2_000)),
+            io_timeout: Duration::from_millis(protocol.io_timeout_ms.unwrap_or(2_000)),
+            line_ending: protocol.line_ending,
+        })
+    }
+
+    pub fn endpoint(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+pub fn parse_backend_command(json: &str) -> Result<Command, AsciiTcpError> {
+    Ok(serde_json::from_str(json)?)
+}
+
+pub fn parse_backend_batch(json: &str) -> Result<BatchCommands, AsciiTcpError> {
+    Ok(serde_json::from_str(json)?)
+}
+
+pub fn parse_backend_payload(json: &str) -> Result<Payload, AsciiTcpError> {
+    Ok(serde_json::from_str(json)?)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TcpBackend {
+    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl TcpBackend {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) async fn exchange_line(
+        &self,
+        config: &AsciiTcpConfig,
+        request: &str,
+    ) -> Result<String, AsciiTcpError> {
+        let _guard = self.acquire_endpoint(config).await;
+        exchange_line(config, request).await
+    }
+
+    pub(crate) async fn execute_command(
+        &self,
+        command: &Command,
+    ) -> Result<CommandResult, AsciiTcpError> {
+        let config = AsciiTcpConfig::from_protocol(&command.protocol)?;
+        let response = self.exchange_line(&config, &command.request).await?;
+        Ok(CommandResult {
+            id: command.id.clone(),
+            response,
+        })
+    }
+
+    async fn acquire_endpoint(&self, config: &AsciiTcpConfig) -> OwnedMutexGuard<()> {
+        let lock = self.get_or_create_lock(&config.endpoint()).await;
+        lock.lock_owned().await
+    }
+
+    async fn get_or_create_lock(&self, endpoint: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.locks.lock().await;
+        locks
+            .entry(endpoint.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+}
+
+pub async fn exchange_line(
+    config: &AsciiTcpConfig,
+    request: &str,
+) -> Result<String, AsciiTcpError> {
+    let stream = tokio::time::timeout(
+        config.connect_timeout,
+        TcpStream::connect(config.endpoint()),
+    )
+    .await
+    .map_err(|_| AsciiTcpError::ConnectTimeout)??;
 
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
 
-    let outbound = format!("{}{}", request, cfg.line_ending.as_str());
-    tokio::time::timeout(cfg.io_timeout, async {
+    let outbound = format!("{}{}", request, config.line_ending.as_str());
+    tokio::time::timeout(config.io_timeout, async {
         writer.write_all(outbound.as_bytes()).await?;
         writer.flush().await
     })
     .await
     .map_err(|_| AsciiTcpError::IoTimeout)??;
 
-    let mut line = String::new();
-    let read_n = tokio::time::timeout(cfg.io_timeout, reader.read_line(&mut line))
-        .await
-        .map_err(|_| AsciiTcpError::IoTimeout)??;
+    let line = tokio::time::timeout(
+        config.io_timeout,
+        read_ascii_line(&mut reader, config.line_ending, None),
+    )
+    .await
+    .map_err(|_| AsciiTcpError::IoTimeout)??;
 
-    if read_n == 0 {
-        return Err(AsciiTcpError::Eof);
+    line.ok_or(AsciiTcpError::Eof)
+}
+
+pub(crate) async fn read_ascii_line<R>(
+    reader: &mut R,
+    line_ending: LineEnding,
+    max_line_length: Option<usize>,
+) -> Result<Option<String>, AsciiTcpError>
+where
+    R: AsyncRead + Unpin,
+{
+    let terminator = line_ending.as_str().as_bytes();
+    let mut bytes = Vec::new();
+
+    loop {
+        let byte = match reader.read_u8().await {
+            Ok(byte) => byte,
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof && bytes.is_empty() => {
+                return Ok(None);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(AsciiTcpError::Eof);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        bytes.push(byte);
+
+        if bytes.ends_with(terminator) {
+            bytes.truncate(bytes.len() - terminator.len());
+            let line = String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            return Ok(Some(line));
+        }
+        if let Some(max_line_length) = max_line_length {
+            if bytes.len() > max_line_length {
+                return Err(AsciiTcpError::RequestTooLong(max_line_length));
+            }
+        }
     }
-
-    while line.ends_with('\n') || line.ends_with('\r') {
-        line.pop();
-    }
-
-    Ok(line)
 }
