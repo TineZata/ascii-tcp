@@ -7,6 +7,7 @@ description = "Tokio-based ASCII request/response client and server over TCP"
 license = "MPL-2.0"
 keywords = ["tcp", "ascii", "client", "server", "tokio"]
 categories = ["network-programming", "asynchronous"]
+repository = "https://github.com/TineZata/ascii-tcp"
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "time", "rt", "sync", "macros"] }
