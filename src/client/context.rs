@@ -3,6 +3,7 @@ use crate::{parse_backend_payload, AsciiTcpError, CommandResultPayload, Payload}
 use super::tcp::ContextInner;
 use super::ClientConfig;
 
+/// Manages command execution against one or more endpoints with optional retry and connect/disconnect callbacks.
 #[derive(Clone, Default)]
 pub struct Context {
     inner: ContextInner,
@@ -60,6 +61,7 @@ impl Context {
         }
     }
 
+    /// Executes the payload once without retrying, returning the first error encountered.
     pub async fn execute_payload_once(
         &self,
         payload: &Payload,
@@ -67,11 +69,13 @@ impl Context {
         self.inner.execute_payload(payload).await
     }
 
+    /// Parses `json` as a payload and executes it, retrying according to `ClientConfig`.
     pub async fn execute_json(&self, json: &str) -> Result<CommandResultPayload, AsciiTcpError> {
         let payload = parse_backend_payload(json)?;
         self.execute_payload(&payload).await
     }
 
+    /// Returns the `ClientConfig` this context was created with.
     pub fn config(&self) -> &ClientConfig {
         &self.config
     }

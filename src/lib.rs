@@ -12,8 +12,9 @@ pub mod client;
 pub mod server;
 
 pub use client::{ClientConfig, Context};
-pub use server::{AlarmSeverity, AlarmStatus, Server, ServerConfig, ServerHandle, ServerMetadata};
+pub use server::{Server, ServerConfig, ServerHandle};
 
+/// Connection parameters for a single ASCII-TCP endpoint.
 #[derive(Debug, Clone)]
 pub struct AsciiTcpConfig {
     pub host: String,
@@ -35,6 +36,7 @@ impl Default for AsciiTcpConfig {
     }
 }
 
+/// Line ending used to frame requests and responses.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LineEnding {
@@ -53,6 +55,7 @@ impl LineEnding {
     }
 }
 
+/// Errors that can occur during client or server operations.
 #[derive(Debug, Error)]
 pub enum AsciiTcpError {
     #[error("connect timeout")]
@@ -74,6 +77,7 @@ pub enum AsciiTcpError {
 }
 
 impl AsciiTcpError {
+    /// Returns `true` if the error is likely transient and safe to retry.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -82,6 +86,7 @@ impl AsciiTcpError {
     }
 }
 
+/// Wire-format protocol block parsed from JSON config.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HardwareProtocol {
     #[serde(rename = "type")]
@@ -93,6 +98,7 @@ pub struct HardwareProtocol {
     pub io_timeout_ms: Option<u64>,
 }
 
+/// A single ASCII-TCP command with its target endpoint.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Command {
     pub id: Option<String>,
@@ -100,22 +106,26 @@ pub struct Command {
     pub protocol: HardwareProtocol,
 }
 
+/// The response received for a single [`Command`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommandResult {
     pub id: Option<String>,
     pub response: String,
 }
 
+/// A set of commands to execute sequentially, parsed from `{"commands": [...]}`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BatchCommands {
     pub commands: Vec<Command>,
 }
 
+/// Responses from a [`BatchCommands`] execution.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BatchResult {
     pub responses: Vec<CommandResult>,
 }
 
+/// Either a single [`Command`] or a [`BatchCommands`]; both forms deserialise from the same JSON.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Payload {
@@ -123,6 +133,7 @@ pub enum Payload {
     Batch(BatchCommands),
 }
 
+/// Result of executing a [`Payload`]: a single response or a batch of responses.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum CommandResultPayload {
@@ -131,6 +142,7 @@ pub enum CommandResultPayload {
 }
 
 impl AsciiTcpConfig {
+    /// Builds an `AsciiTcpConfig` from a `HardwareProtocol`, returning an error if `type` is not `"ascii-tcp"`.
     pub fn from_protocol(protocol: &HardwareProtocol) -> Result<Self, AsciiTcpError> {
         if protocol.kind != "ascii-tcp" {
             return Err(AsciiTcpError::InvalidProtocolType(protocol.kind.clone()));
@@ -145,19 +157,23 @@ impl AsciiTcpConfig {
         })
     }
 
+    /// Returns `"host:port"` as a string.
     pub fn endpoint(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
 }
 
+/// Parses a JSON string into a [`Command`].
 pub fn parse_backend_command(json: &str) -> Result<Command, AsciiTcpError> {
     Ok(serde_json::from_str(json)?)
 }
 
+/// Parses a JSON string into a [`BatchCommands`].
 pub fn parse_backend_batch(json: &str) -> Result<BatchCommands, AsciiTcpError> {
     Ok(serde_json::from_str(json)?)
 }
 
+/// Parses a JSON string into a [`Payload`] (single command or batch).
 pub fn parse_backend_payload(json: &str) -> Result<Payload, AsciiTcpError> {
     Ok(serde_json::from_str(json)?)
 }
@@ -207,6 +223,7 @@ impl TcpBackend {
     }
 }
 
+/// Executes a single request and returns the response line, without the line ending.
 pub async fn exchange_line(
     config: &AsciiTcpConfig,
     request: &str,
@@ -239,6 +256,7 @@ pub async fn exchange_line(
     line.ok_or(AsciiTcpError::Eof)
 }
 
+/// Reads a single line from the reader, using the specified line ending as the terminator.
 pub(crate) async fn read_ascii_line<R>(
     reader: &mut R,
     line_ending: LineEnding,

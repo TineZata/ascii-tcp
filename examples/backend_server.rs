@@ -2,7 +2,7 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use ascii_tcp::{Command, Server, ServerConfig, ServerMetadata};
+use ascii_tcp::{Command, Server, ServerConfig};
 use serde::Deserialize;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -16,7 +16,10 @@ struct BackendConfig {
 struct ServerCommand {
     #[serde(flatten)]
     command: Command,
-    server: ServerMetadata,
+    /// Whether `backend_server` should host this command as a simulated server. Entries
+    /// with `server: false` (or omitted) describe real devices and are skipped here.
+    #[serde(default)]
+    server: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,9 +59,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| "examples/backend-config.json".to_string());
     let json = std::fs::read_to_string(config_path)?;
     let config: BackendConfig = serde_json::from_str(&json)?;
-    let mut servers = Vec::with_capacity(config.commands.len());
+    let hosted_commands: Vec<_> = config.commands.into_iter().filter(|c| c.server).collect();
+    let mut servers = Vec::with_capacity(hosted_commands.len());
 
-    for server_command in config.commands {
+    for server_command in hosted_commands {
         let command_id = server_command
             .command
             .id
@@ -67,7 +71,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let (initial_value, step, direction) = simulation_for(&server_command.command);
         let protocol = server_command.command.protocol;
         let bind_addr: SocketAddr = format!("{}:{}", protocol.host, protocol.port).parse()?;
-        let metadata = server_command.server;
         let value = Arc::new(Mutex::new(initial_value));
         let value_for_handler = Arc::clone(&value);
         let command_id_for_handler = command_id.clone();
@@ -76,7 +79,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             ServerConfig {
                 bind_addr,
                 line_ending: protocol.line_ending,
-                metadata,
                 ..ServerConfig::default()
             },
             move |request, peer| {
@@ -94,8 +96,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         %peer,
                         %request,
                         value = response,
-                        alarm_severity = ?metadata.alarm_severity,
-                        alarm_status = ?metadata.alarm_status,
                         "served value"
                     );
                     Ok(response.to_string())
@@ -108,8 +108,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             %command_id,
             address = %server.local_addr(),
             ?direction,
-            alarm_severity = ?metadata.alarm_severity,
-            alarm_status = ?metadata.alarm_status,
             "server started"
         );
         servers.push(server);

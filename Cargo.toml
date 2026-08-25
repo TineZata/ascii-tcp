@@ -2,12 +2,15 @@
 name = "ascii-tcp"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 description = "Tokio-based ASCII request/response client and server over TCP"
-license = "MIT OR Apache-2.0"
+license = "MPL-2.0"
+keywords = ["tcp", "ascii", "client", "server", "tokio"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "time", "rt", "sync", "macros"] }
-thiserror = "2"
+thiserror = "2.0.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -15,3 +18,4 @@ tracing = "0.1"
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+regex = "1"

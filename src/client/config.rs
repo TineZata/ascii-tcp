@@ -1,12 +1,16 @@
 use std::time::Duration;
 
+/// Retry behaviour for [`Context`](super::Context).
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
+    /// How long to wait between retry attempts on transient errors.
     pub retry_interval: Duration,
+    /// If `true`, [`Context::execute_payload`](super::Context::execute_payload) retries on transient errors indefinitely.
     pub retry_forever: bool,
 }
 
 impl ClientConfig {
+    /// Loads `ClientConfig` from `ASCII_TCP_RETRY_MS` and `ASCII_TCP_RETRY_FOREVER` environment variables.
     pub fn from_env() -> Self {
         let retry_interval_ms = std::env::var("ASCII_TCP_RETRY_MS")
             .ok()

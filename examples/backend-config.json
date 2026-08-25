@@ -11,10 +11,7 @@
         "connect_timeout_ms": 2000,
         "io_timeout_ms": 2000
       },
-      "server": {
-        "alarm_serverity": "NONE",
-        "alarm_status": "NO_ALARM"
-      }
+      "server": true
     },
     {
       "id": "temperature_ascii_tcp",
@@ -27,10 +24,7 @@
         "connect_timeout_ms": 2000,
         "io_timeout_ms": 2000
       },
-      "server": {
-        "alarm_serverity": "NONE",
-        "alarm_status": "NO_ALARM"
-      }
+      "server": true
     }
   ]
 }
