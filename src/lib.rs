@@ -9,10 +9,14 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 pub mod client;
+pub mod pool;
 pub mod server;
+pub mod template;
 
 pub use client::{ClientConfig, Context};
+pub use pool::ConnectionPool;
 pub use server::{Server, ServerConfig, ServerHandle};
+pub use template::{parse_first_value, parse_response_template, Capture, ResponseTemplate, SpecKind};
 
 /// Connection parameters for a single ASCII-TCP endpoint.
 #[derive(Debug, Clone)]
@@ -74,6 +78,10 @@ pub enum AsciiTcpError {
     RequestTooLong(usize),
     #[error("server task stopped")]
     ServerStopped,
+    #[error("invalid response template: {0}")]
+    TemplateSyntax(String),
+    #[error("response '{response}' does not match template '{template}'")]
+    ResponseMismatch { template: String, response: String },
 }
 
 impl AsciiTcpError {
@@ -221,6 +229,30 @@ impl TcpBackend {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
+}
+
+/// Sends a single request without waiting for a response.
+///
+/// Use this for commands the endpoint does not acknowledge; [`exchange_line`]
+/// would block until `io_timeout` elapses and then fail with
+/// [`AsciiTcpError::IoTimeout`].
+pub async fn send_line(config: &AsciiTcpConfig, request: &str) -> Result<(), AsciiTcpError> {
+    let mut stream = tokio::time::timeout(
+        config.connect_timeout,
+        TcpStream::connect(config.endpoint()),
+    )
+    .await
+    .map_err(|_| AsciiTcpError::ConnectTimeout)??;
+
+    let outbound = format!("{}{}", request, config.line_ending.as_str());
+    tokio::time::timeout(config.io_timeout, async {
+        stream.write_all(outbound.as_bytes()).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(|_| AsciiTcpError::IoTimeout)??;
+
+    Ok(())
 }
 
 /// Executes a single request and returns the response line, without the line ending.
