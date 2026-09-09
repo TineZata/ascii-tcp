@@ -50,6 +50,26 @@ fn config(port: u16) -> AsciiTcpConfig {
 }
 
 #[tokio::test]
+async fn failed_connection_enters_a_shared_reconnect_cooldown() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let pool = ConnectionPool::new();
+    let cfg = config(port);
+
+    assert!(pool.exchange_line(&cfg, "ARM?").await.is_err());
+
+    let error = pool.exchange_line(&cfg, "ARM?").await.unwrap_err();
+    match error {
+        ascii_tcp::AsciiTcpError::Io(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        }
+        other => panic!("expected cooldown error, got {other}"),
+    }
+}
+
+#[tokio::test]
 async fn reuses_a_single_connection_across_many_exchanges() {
     let (port, accepts) = spawn_server().await;
     let pool = ConnectionPool::new();
@@ -121,4 +141,64 @@ async fn send_line_shares_the_pooled_connection() {
     pool.send_line(&cfg, "DISARM").await.unwrap();
 
     assert_eq!(accepts.load(Ordering::SeqCst), 1);
+}
+
+/// Serves `ARM?` but pushes an unsolicited event frame before the first reply.
+async fn spawn_server_with_unsolicited_event() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = BufReader::new(reader).lines();
+        let mut fired = false;
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !fired {
+                fired = true;
+                let event = "VEL,GPIO6=5579046636,GPIO2=5565819589,DELTA=13227047(ticks at 8ns)\r\n";
+                if writer.write_all(event.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+            let response = match line.trim() {
+                "ARM?" => "ARM=1\r\n".to_string(),
+                other => format!("ERR,{other}\r\n"),
+            };
+            if writer.write_all(response.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    port
+}
+
+#[tokio::test]
+async fn skips_unsolicited_frames_until_the_matching_reply() {
+    let port = spawn_server_with_unsolicited_event().await;
+    let pool = ConnectionPool::new();
+    let cfg = config(port);
+
+    let is_arm_reply = |line: &str| line.starts_with("ARM=");
+    for _ in 0..5 {
+        let response = pool
+            .exchange_line_matching(&cfg, "ARM?", is_arm_reply)
+            .await
+            .unwrap();
+        assert_eq!(response, "ARM=1");
+    }
+}
+
+#[tokio::test]
+async fn without_a_matcher_an_unsolicited_frame_desynchronises_the_stream() {
+    let port = spawn_server_with_unsolicited_event().await;
+    let pool = ConnectionPool::new();
+    let cfg = config(port);
+
+    // Documents why the matcher exists: the event frame is mistaken for the reply.
+    let response = pool.exchange_line(&cfg, "ARM?").await.unwrap();
+    assert!(response.starts_with("VEL,"), "got '{response}'");
 }
