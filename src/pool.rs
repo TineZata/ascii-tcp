@@ -213,19 +213,12 @@ async fn process_request(
 ) -> Option<String> {
     match request {
         DeviceRequest::Exchange { config, request, accept, respond } => {
-            let result = async {
-                let io = ensure_connected(connection, &config, endpoint).await?;
-                exchange(io, &config, &request, &accept).await
-            }
-            .await;
+            let result =
+                exchange_with_retry(connection, &config, endpoint, &request, &accept).await;
             respond_result(respond, result)
         }
         DeviceRequest::Send { config, request, respond } => {
-            let result = async {
-                let io = ensure_connected(connection, &config, endpoint).await?;
-                write_request(io, &config, &request).await
-            }
-            .await;
+            let result = send_with_retry(connection, &config, endpoint, &request).await;
             respond_result(respond, result)
         }
         DeviceRequest::Disconnect { respond } => {
@@ -257,6 +250,66 @@ fn respond_result<T>(
             Some(message)
         }
     }
+}
+
+/// Runs one exchange, retrying once on a fresh socket when a reused connection fails.
+///
+/// A pooled socket can go half-open without the peer sending a FIN, so the first use
+/// after the break fails even though the endpoint is reachable. Reconnecting in place
+/// keeps that failure from dropping the connection every other caller shares.
+async fn exchange_with_retry(
+    connection: &mut Option<Connection>,
+    config: &AsciiTcpConfig,
+    endpoint: &str,
+    request: &str,
+    accept: &ResponseMatcher,
+) -> Result<String, AsciiTcpError> {
+    let reused = connection.is_some();
+    let error = match ensure_connected(&mut *connection, config, endpoint).await {
+        Ok(io) => match exchange(io, config, request, accept).await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        },
+        Err(error) => error,
+    };
+
+    if !reused || !error.is_retryable() {
+        return Err(error);
+    }
+
+    tracing::debug!(endpoint, error = %error, "ascii-tcp retrying on a fresh connection");
+    *connection = None;
+    let io = ensure_connected(connection, config, endpoint).await?;
+    exchange(io, config, request, accept).await
+}
+
+/// Fire-and-forget counterpart to [`exchange_with_retry`].
+///
+/// A write that fails on a reused socket has almost certainly not reached the peer,
+/// so resending it does not risk applying the command twice.
+async fn send_with_retry(
+    connection: &mut Option<Connection>,
+    config: &AsciiTcpConfig,
+    endpoint: &str,
+    request: &str,
+) -> Result<(), AsciiTcpError> {
+    let reused = connection.is_some();
+    let error = match ensure_connected(&mut *connection, config, endpoint).await {
+        Ok(io) => match write_request(io, config, request).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        },
+        Err(error) => error,
+    };
+
+    if !reused || !error.is_retryable() {
+        return Err(error);
+    }
+
+    tracing::debug!(endpoint, error = %error, "ascii-tcp retrying on a fresh connection");
+    *connection = None;
+    let io = ensure_connected(connection, config, endpoint).await?;
+    write_request(io, config, request).await
 }
 
 async fn ensure_connected<'a>(
@@ -298,15 +351,19 @@ async fn exchange(
     accept: &ResponseMatcher,
 ) -> Result<String, AsciiTcpError> {
     write_request(io, config, request).await?;
+    tracing::info!(endpoint = %config.endpoint(), request, "ascii-tcp sending request");
     tokio::time::timeout(config.io_timeout, async {
         loop {
             let line = read_ascii_line(io, config.line_ending, None)
                 .await?
                 .ok_or(AsciiTcpError::Eof)?;
+            tracing::info!(endpoint = %config.endpoint(), line, "ascii-tcp received line");
             if accept(&line) {
                 return Ok(line);
             }
-            tracing::debug!(endpoint = %config.endpoint(), line, "ascii-tcp discarding unsolicited line");
+            // Surfaced at WARN because a response-template mismatch is otherwise indistinguishable
+            // from a mute device: both stall this loop until io_timeout reports IoTimeout.
+            tracing::warn!(endpoint = %config.endpoint(), line, "ascii-tcp discarding unsolicited line");
         }
     })
     .await
