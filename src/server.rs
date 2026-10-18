@@ -13,11 +13,43 @@ use tracing::{debug, warn};
 use crate::{read_ascii_line, AsciiTcpError, LineEnding};
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<String, AsciiTcpError>> + Send>>;
-type Handler = Arc<dyn Fn(String, SocketAddr) -> HandlerFuture + Send + Sync>;
+type HandlerFn = dyn Fn(String, SocketAddr) -> HandlerFuture + Send + Sync;
 
-/// Configuration for a `Server`.
+/// The request handler: maps each request line (and the peer address) to a response line.
+#[derive(Clone)]
+pub struct RequestHandler(Arc<HandlerFn>);
+
+impl RequestHandler {
+    /// Wraps an async function or closure as a `Handler`.
+    pub fn new<F, Fut>(handler: F) -> Self
+    where
+        F: Fn(String, SocketAddr) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, AsciiTcpError>> + Send + 'static,
+    {
+        Self(Arc::new(move |request, peer| Box::pin(handler(request, peer))))
+    }
+
+    fn call(&self, request: String, peer: SocketAddr) -> HandlerFuture {
+        (self.0)(request, peer)
+    }
+}
+
+impl Default for RequestHandler {
+    /// Echoes each request back as the response.
+    fn default() -> Self {
+        Self::new(|request, _peer| async move { Ok(request) })
+    }
+}
+
+impl std::fmt::Debug for RequestHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Handler(..)")
+    }
+}
+
+/// Configuration for a [`Server`].
 #[derive(Debug, Clone)]
-pub struct ServerConfig {
+pub struct ServerContext {
     /// The address to bind the server to. Use `SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4000)` for the default.
     pub bind_addr: SocketAddr,
     /// The I/O timeout for reading requests and writing responses.
@@ -27,10 +59,23 @@ pub struct ServerConfig {
     /// The maximum length of a request line, in bytes. Requests longer than this will be
     /// rejected with an error.
     pub max_line_length: usize,
+    /// Called for every request. Defaults to echoing the request back.
+    pub handler: RequestHandler,
 }
 
-impl ServerConfig {
-    /// Creates a `ServerConfig` from environment variables. The following variables are supported:
+impl ServerContext {
+    /// Replaces the request handler.
+    pub fn with_handler<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(String, SocketAddr) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, AsciiTcpError>> + Send + 'static,
+    {
+        self.handler = RequestHandler::new(handler);
+        self
+    }
+
+    /// Creates a `ServerContext` from environment variables. The following variables are supported;
+    /// values that cannot be parsed are ignored, except an invalid address, which is an error:
     /// -   `ASCII_TCP_SERVER_ADDR`: The address to bind the server to, in the form `IP:PORT`.
     ///     If not set, defaults to `127.0.0.1:4000`.
     /// -   `ASCII_TCP_SERVER_IO_TIMEOUT_MS`: The I/O timeout for reading requests and writing responses,
@@ -38,10 +83,10 @@ impl ServerConfig {
     /// -   `ASCII_TCP_SERVER_MAX_LINE_LENGTH`: The maximum length of a request line, in bytes.
     ///     Requests longer than this will be rejected with an error. If not set, defaults to 8192 (8 KiB).
     pub fn from_env() -> Result<Self, AsciiTcpError> {
-        let mut config = Self::default();
+        let mut ctx = Self::default();
 
         if let Ok(value) = std::env::var("ASCII_TCP_SERVER_ADDR") {
-            config.bind_addr = value.parse().map_err(|error| {
+            ctx.bind_addr = value.parse().map_err(|error| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("invalid ASCII_TCP_SERVER_ADDR: {error}"),
@@ -52,26 +97,28 @@ impl ServerConfig {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
         {
-            config.io_timeout = Duration::from_millis(value);
+            ctx.io_timeout = Duration::from_millis(value);
         }
         if let Some(value) = std::env::var("ASCII_TCP_SERVER_MAX_LINE_LENGTH")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
         {
-            config.max_line_length = value;
+            ctx.max_line_length = value;
         }
 
-        Ok(config)
+        Ok(ctx)
     }
 }
 
-impl Default for ServerConfig {
+impl Default for ServerContext {
+    /// Binds `127.0.0.1:4000`, 2 s I/O timeout, LF line ending, 8 KiB max line, echo handler.
     fn default() -> Self {
         Self {
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4000),
             io_timeout: Duration::from_secs(2),
             line_ending: LineEnding::Lf,
             max_line_length: 8 * 1024,
+            handler: RequestHandler::default(),
         }
     }
 }
@@ -107,18 +154,13 @@ pub struct Server {
 }
 
 impl Server {
-    /// Starts a server bound to `config.bind_addr`, calling `handler` for every request.
-    pub async fn start<F, Fut>(config: ServerConfig, handler: F) -> Result<Self, AsciiTcpError>
-    where
-        F: Fn(String, SocketAddr) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<String, AsciiTcpError>> + Send + 'static,
-    {
-        let listener = TcpListener::bind(config.bind_addr).await?;
+    /// Starts a server bound to `ctx.bind_addr`, calling `ctx.handler` for every request.
+    pub async fn start(ctx: ServerContext) -> Result<Self, AsciiTcpError> {
+        let listener = TcpListener::bind(ctx.bind_addr).await?;
         let local_addr = listener.local_addr()?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let handler: Handler = Arc::new(move |request, peer| Box::pin(handler(request, peer)));
 
-        let join = tokio::spawn(run_server(listener, config, handler, shutdown_rx));
+        let join = tokio::spawn(run_server(listener, ctx, shutdown_rx));
         Ok(Self {
             handle: ServerHandle {
                 local_addr,
@@ -128,13 +170,13 @@ impl Server {
         })
     }
 
-    /// Starts a server using `ServerConfig::from_env` for configuration.
+    /// Starts a server using `ServerContext::from_env` for configuration and `handler` for requests.
     pub async fn start_from_env<F, Fut>(handler: F) -> Result<Self, AsciiTcpError>
     where
         F: Fn(String, SocketAddr) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<String, AsciiTcpError>> + Send + 'static,
     {
-        Self::start(ServerConfig::from_env()?, handler).await
+        Self::start(ServerContext::from_env()?.with_handler(handler)).await
     }
 
     /// Starts a server on a random available port on localhost, useful for tests and in-process demos.
@@ -143,11 +185,11 @@ impl Server {
         F: Fn(String, SocketAddr) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<String, AsciiTcpError>> + Send + 'static,
     {
-        let config = ServerConfig {
+        let ctx = ServerContext {
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            ..ServerConfig::default()
+            ..ServerContext::default()
         };
-        Self::start(config, handler).await
+        Self::start(ctx.with_handler(handler)).await
     }
 
     /// Returns a cloneable `ServerHandle` for shutdown signalling without consuming `self`.
@@ -166,6 +208,8 @@ impl Server {
     }
 
     /// Shuts down the server and waits for its task to finish.
+    ///
+    /// Returns [`AsciiTcpError::ServerStopped`] if the task panicked or was cancelled.
     pub async fn stop_drop(mut self) -> Result<(), AsciiTcpError> {
         self.handle.shutdown();
         let join = self.join.take().ok_or(AsciiTcpError::ServerStopped)?;
@@ -179,10 +223,10 @@ impl Drop for Server {
     }
 }
 
+/// Accept loop: spawns one task per connection until shutdown is signalled, then aborts them all.
 async fn run_server(
     listener: TcpListener,
-    config: ServerConfig,
-    handler: Handler,
+    ctx: ServerContext,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), AsciiTcpError> {
     let mut connections = JoinSet::new();
@@ -196,10 +240,9 @@ async fn run_server(
             }
             accepted = listener.accept() => {
                 let (stream, peer) = accepted?;
-                let handler = Arc::clone(&handler);
-                let config = config.clone();
+                let ctx = ctx.clone();
                 connections.spawn(async move {
-                    if let Err(error) = serve_connection(stream, peer, config, handler).await {
+                    if let Err(error) = serve_connection(stream, peer, ctx).await {
                         debug!(%peer, error = %error, "TCP client disconnected");
                     }
                 });
@@ -217,11 +260,13 @@ async fn run_server(
     Ok(())
 }
 
+/// Serves one client: reads a request line, calls the handler, writes the response line, repeat.
+/// Returns `Ok(())` when the client closes the connection cleanly; any error (idle timeout,
+/// oversized line, handler error, I/O error) ends the connection.
 async fn serve_connection(
     stream: TcpStream,
     peer: SocketAddr,
-    config: ServerConfig,
-    handler: Handler,
+    config: ServerContext,
 ) -> Result<(), AsciiTcpError> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -242,7 +287,7 @@ async fn serve_connection(
             return Ok(());
         };
 
-        let response = handler(request, peer).await?;
+        let response = config.handler.call(request, peer).await?;
         let outbound = format!("{}{}", response, config.line_ending.as_str());
         tokio::time::timeout(config.io_timeout, async {
             writer.write_all(outbound.as_bytes()).await?;

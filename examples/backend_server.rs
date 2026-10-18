@@ -2,7 +2,7 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use ascii_tcp::{Command, Server, ServerConfig};
+use ascii_tcp::{Command, Server, ServerContext};
 use serde::Deserialize;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -76,12 +76,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let command_id_for_handler = command_id.clone();
 
         let server = Server::start(
-            ServerConfig {
+            ServerContext {
                 bind_addr,
                 line_ending: protocol.line_ending,
-                ..ServerConfig::default()
-            },
-            move |request, peer| {
+                ..ServerContext::default()
+            }
+            .with_handler(move |request, peer| {
                 let value = Arc::clone(&value_for_handler);
                 let command_id = command_id_for_handler.clone();
                 async move {
@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     );
                     Ok(response.to_string())
                 }
-            },
+            }),
         )
         .await?;
 

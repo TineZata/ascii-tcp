@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ascii_tcp::{
     exchange_line, AsciiTcpConfig, AsciiTcpError, ClientConfig, Command, CommandResultPayload,
-    Context, HardwareProtocol, LineEnding, Payload, Server, ServerConfig,
+    Context, HardwareProtocol, LineEnding, Payload, Server, ServerContext,
 };
 
 /// Builds the protocol block a client needs to reach `addr` over ascii-tcp.
@@ -53,12 +53,12 @@ async fn context_fails_to_connect_when_no_server_is_listening() {
 async fn server_echoes_uppercase_for_every_line_ending() {
     for line_ending in [LineEnding::Lf, LineEnding::CrLf, LineEnding::Cr] {
         let server = Server::start(
-            ServerConfig {
+            ServerContext {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 line_ending,
-                ..ServerConfig::default()
-            },
-            |request, _peer| async move { Ok(request.to_uppercase()) },
+                ..ServerContext::default()
+            }
+            .with_handler(|request, _peer| async move { Ok(request.to_uppercase()) }),
         )
         .await
         .unwrap();
@@ -129,11 +129,11 @@ async fn context_retries_until_the_server_comes_online() {
     let server_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Server::start(
-            ServerConfig {
+            ServerContext {
                 bind_addr: server_addr,
-                ..ServerConfig::default()
-            },
-            |request, _peer| async move { Ok(format!("response:{request}")) },
+                ..ServerContext::default()
+            }
+            .with_handler(|request, _peer| async move { Ok(format!("response:{request}")) }),
         )
         .await
         .unwrap()

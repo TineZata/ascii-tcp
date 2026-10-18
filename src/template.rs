@@ -17,8 +17,9 @@
 //! ```
 //! use ascii_tcp::template::parse_response_template;
 //!
-//! let captures = parse_response_template("ARM=%d", "ARM=1").unwrap();
-//! assert_eq!(captures[0].as_i64(), Some(1));
+//! // The trailing ` DegC` is a literal: it must be present but is not captured.
+//! let captures = parse_response_template("TEMP=%f DegC", "TEMP=22.5 DegC").unwrap();
+//! assert_eq!(captures[0].as_f64(), Some(22.5));
 //! ```
 //!
 //! Matching is anchored: the whole response (after trimming surrounding
@@ -30,22 +31,30 @@ use crate::AsciiTcpError;
 /// The value type a conversion specifier extracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecKind {
+    /// `%d`, `%i`, `%u`: decimal integer.
     Int,
+    /// `%f`, `%e`, `%g`: decimal number with optional fraction and exponent.
     Float,
+    /// `%x`, `%X`: hexadecimal integer.
     Hex,
+    /// `%s`: free text up to the next literal.
     Text,
 }
 
+/// A parsed piece of a template: fixed text or a conversion.
 #[derive(Debug, Clone)]
 enum Segment {
     Literal(String),
+    /// `capture` is `false` for `%*` conversions, which match but are discarded.
     Spec { kind: SpecKind, capture: bool },
 }
 
 /// One field extracted from a response by a [`ResponseTemplate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capture {
+    /// Which conversion produced this capture.
     pub kind: SpecKind,
+    /// The matched text, verbatim.
     pub text: String,
 }
 
@@ -55,6 +64,10 @@ impl Capture {
         &self.text
     }
 
+    /// The capture as an integer, or `None` if it does not fit.
+    ///
+    /// Hex captures accept an optional sign and `0x` prefix; other kinds parse as `i64`,
+    /// falling back to truncating an `f64` (so `"2.9"` yields `2`).
     pub fn as_i64(&self) -> Option<i64> {
         match self.kind {
             SpecKind::Hex => {
@@ -74,6 +87,7 @@ impl Capture {
         }
     }
 
+    /// The capture as a float, or `None` if the text is not numeric. Hex captures convert via `as_i64`.
     pub fn as_f64(&self) -> Option<f64> {
         match self.kind {
             SpecKind::Hex => self.as_i64().map(|v| v as f64),
@@ -167,6 +181,10 @@ impl ResponseTemplate {
     }
 
     /// Matches `response` against the template and returns every captured field.
+    ///
+    /// Numeric conversions skip leading spaces/tabs; `%s` extends to the next literal, or to the end
+    /// when it is last. Returns [`AsciiTcpError::ResponseMismatch`] if the layout differs or
+    /// any text is left over.
     pub fn captures(&self, response: &str) -> Result<Vec<Capture>, AsciiTcpError> {
         let text = response.trim();
         let mut pos = 0usize;
@@ -218,6 +236,8 @@ impl ResponseTemplate {
     }
 
     /// Matches `response` and returns the first captured field.
+    ///
+    /// Fails with [`AsciiTcpError::TemplateSyntax`] when the template has no capturing conversion.
     pub fn capture_first(&self, response: &str) -> Result<Capture, AsciiTcpError> {
         self.captures(response)?
             .into_iter()
@@ -230,6 +250,7 @@ impl ResponseTemplate {
             })
     }
 
+    /// Builds the error for a response that does not fit the template.
     fn mismatch(&self, response: &str) -> AsciiTcpError {
         AsciiTcpError::ResponseMismatch {
             template: self.source.clone(),
@@ -251,6 +272,7 @@ pub fn parse_first_value(template: &str, response: &str) -> Result<Capture, Asci
     ResponseTemplate::compile(template)?.capture_first(response)
 }
 
+/// Splits an optional leading `+`/`-` from `text`, returning whether it was negative.
 fn split_sign(text: &str) -> (bool, &str) {
     match text.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -258,6 +280,7 @@ fn split_sign(text: &str) -> (bool, &str) {
     }
 }
 
+/// Byte length of leading spaces and tabs.
 fn leading_whitespace(text: &str) -> usize {
     text.len() - text.trim_start_matches([' ', '\t']).len()
 }
@@ -324,29 +347,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_arm_query_response() {
-        for (response, expected) in [("ARM=0", 0), ("ARM=1", 1)] {
-            let capture = parse_first_value("ARM=%d", response).unwrap();
-            assert_eq!(capture.as_i64(), Some(expected));
-            assert_eq!(capture.as_f64(), Some(expected as f64));
+    fn parses_temperature_query_response() {
+        for (response, expected) in [("TEMP=22.5 DegC", 22.5), ("TEMP=-3 DegC", -3.0)] {
+            let capture = parse_first_value("TEMP=%f DegC", response).unwrap();
+            assert_eq!(capture.as_f64(), Some(expected));
+            assert_eq!(capture.as_i64(), Some(expected as i64));
         }
     }
 
     #[test]
     fn trims_surrounding_whitespace_and_skips_padding() {
-        let capture = parse_first_value("ARM=%d", "  ARM=  1 \t").unwrap();
-        assert_eq!(capture.as_str(), "1");
+        let capture =         parse_first_value("TEMP=%f DegC", "  TEMP=  22.5 DegC \t").unwrap();
+                assert_eq!(capture.as_str(), "22.5");
     }
 
     #[test]
     fn rejects_response_that_does_not_match() {
-        let error = parse_first_value("ARM=%d", "FIRE=1").unwrap_err();
+        let error = parse_first_value("TEMP=%f DegC", "FIRE=22.5 DegC").unwrap_err();
         assert!(matches!(error, AsciiTcpError::ResponseMismatch { .. }));
 
-        let error = parse_first_value("ARM=%d", "ARM=ON").unwrap_err();
+        let error = parse_first_value("TEMP=%f DegC", "TEMP=HOT DegC").unwrap_err();
         assert!(matches!(error, AsciiTcpError::ResponseMismatch { .. }));
 
-        let error = parse_first_value("ARM=%d", "ARM=1 STALE").unwrap_err();
+        let error = parse_first_value("TEMP=%f DegC", "TEMP=22.5 DegC STALE").unwrap_err();
         assert!(matches!(error, AsciiTcpError::ResponseMismatch { .. }));
     }
 
@@ -376,10 +399,10 @@ mod tests {
 
     #[test]
     fn captures_multiple_fields_and_text() {
-        let captures = parse_response_template("%s=%d,%f", "ARM=1,2.5").unwrap();
-        assert_eq!(captures[0].as_str(), "ARM");
-        assert_eq!(captures[1].as_i64(), Some(1));
-        assert_eq!(captures[2].as_f64(), Some(2.5));
+        let captures =         parse_response_template("%s=%f DegC", "TEMP=22.5 DegC").unwrap();
+                assert_eq!(captures.len(), 2);
+                assert_eq!(captures[0].as_str(), "TEMP");
+                assert_eq!(captures[1].as_f64(), Some(22.5));
     }
 
     #[test]
@@ -403,11 +426,11 @@ mod tests {
     #[test]
     fn rejects_malformed_templates() {
         assert!(matches!(
-            ResponseTemplate::compile("ARM=%q").unwrap_err(),
+            ResponseTemplate::compile("TEMP=%q").unwrap_err(),
             AsciiTcpError::TemplateSyntax(_)
         ));
         assert!(matches!(
-            ResponseTemplate::compile("ARM=%").unwrap_err(),
+            ResponseTemplate::compile("TEMP=%").unwrap_err(),
             AsciiTcpError::TemplateSyntax(_)
         ));
         assert!(matches!(
@@ -415,7 +438,7 @@ mod tests {
             AsciiTcpError::TemplateSyntax(_)
         ));
         assert!(matches!(
-            ResponseTemplate::compile("ARM=%*").unwrap_err(),
+            ResponseTemplate::compile("TEMP=%*").unwrap_err(),
             AsciiTcpError::TemplateSyntax(_)
         ));
     }
@@ -426,5 +449,118 @@ mod tests {
         assert_eq!(template.captures("OK").unwrap().len(), 0);
         assert!(template.capture_first("OK").is_err());
         assert!(template.captures("NAK").is_err());
+    }
+
+    fn capture(kind: SpecKind, text: &str) -> Capture {
+        Capture { kind, text: text.to_string() }
+    }
+
+    #[test]
+    fn capture_converts_hex_with_sign_and_prefix_variants() {
+        assert_eq!(capture(SpecKind::Hex, "-0x1F").as_i64(), Some(-31));
+        assert_eq!(capture(SpecKind::Hex, "+0X1f").as_i64(), Some(31));
+        assert_eq!(capture(SpecKind::Hex, "ff").as_f64(), Some(255.0));
+        assert_eq!(capture(SpecKind::Hex, "FFFFFFFFFFFFFFFFF").as_i64(), None);
+        assert_eq!(capture(SpecKind::Hex, "xyz").as_f64(), None);
+    }
+
+    #[test]
+    fn capture_converts_numbers_leniently_and_text_strictly() {
+        assert_eq!(capture(SpecKind::Float, "2.9").as_i64(), Some(2));
+        assert_eq!(capture(SpecKind::Int, "42").as_f64(), Some(42.0));
+        assert_eq!(capture(SpecKind::Text, "ON").as_i64(), None);
+        assert_eq!(capture(SpecKind::Text, "ON").as_f64(), None);
+        assert_eq!(capture(SpecKind::Text, "ON").as_str(), "ON");
+    }
+
+    #[test]
+    fn compiled_template_exposes_its_source_and_capture_count() {
+        let template = ResponseTemplate::compile("A=%d,B=%*s,C=%f").unwrap();
+        assert_eq!(template.as_str(), "A=%d,B=%*s,C=%f");
+        assert_eq!(template.spec_count(), 2);
+        assert_eq!(ResponseTemplate::compile("").unwrap().spec_count(), 0);
+    }
+
+    #[test]
+    fn text_conversion_runs_to_the_next_literal_or_the_end() {
+        let captures = parse_response_template("NAME=%s;", "NAME=Titan Opta;").unwrap();
+        assert_eq!(captures[0].as_str(), "Titan Opta");
+
+        let captures = parse_response_template("NAME=%s", "NAME=Titan Opta").unwrap();
+        assert_eq!(captures[0].as_str(), "Titan Opta");
+        assert_eq!(captures[0].kind, SpecKind::Text);
+    }
+
+    #[test]
+    fn text_conversion_needs_its_terminating_literal_and_some_text() {
+        assert!(parse_response_template("NAME=%s;", "NAME=Titan").is_err());
+        assert!(parse_response_template("NAME=%s;", "NAME=;").is_err());
+        assert!(parse_response_template("NAME=%s", "NAME=").is_err());
+    }
+
+    #[test]
+    fn literals_must_match_where_they_appear() {
+        assert!(parse_response_template("TEMP=%f DegC", "").is_err());
+        assert!(parse_response_template("TEMP=%f DegC;", "TEMP=22.5 DegC").is_err());
+        assert!(parse_response_template("OK", "OKAY").is_err());
+    }
+
+    #[test]
+    fn integer_scanning_accepts_signs_and_rejects_non_digits() {
+        assert_eq!(parse_first_value("%d", "+7").unwrap().as_i64(), Some(7));
+        assert_eq!(parse_first_value("%i", "-7").unwrap().as_i64(), Some(-7));
+        assert_eq!(parse_first_value("%u", "7").unwrap().as_i64(), Some(7));
+        assert!(parse_first_value("%d", "-").is_err());
+        assert!(parse_first_value("%d", "abc").is_err());
+        assert!(parse_first_value("%d", "1.5").is_err());
+    }
+
+    #[test]
+    fn float_scanning_handles_partial_forms() {
+        assert_eq!(parse_first_value("%f", "3.").unwrap().as_f64(), Some(3.0));
+        assert_eq!(parse_first_value("%g", ".5").unwrap().as_f64(), Some(0.5));
+        assert_eq!(parse_first_value("%e", "2E+2").unwrap().as_f64(), Some(200.0));
+        assert!(parse_first_value("%f", ".").is_err());
+        // An exponent marker without digits is not consumed, so the response is left over.
+        assert!(parse_first_value("%f", "1e").is_err());
+        assert!(parse_first_value("%f", "1e+").is_err());
+    }
+
+    #[test]
+    fn hex_scanning_requires_digits() {
+        assert!(parse_first_value("%x", "0x").is_err());
+        assert!(parse_first_value("%x", "zz").is_err());
+        assert_eq!(parse_first_value("%x", "-0x10").unwrap().as_i64(), Some(-16));
+    }
+
+    #[test]
+    fn convenience_functions_propagate_template_errors() {
+        assert!(matches!(
+            parse_response_template("%q", "1").unwrap_err(),
+            AsciiTcpError::TemplateSyntax(_)
+        ));
+        assert!(matches!(
+            parse_first_value("%", "1").unwrap_err(),
+            AsciiTcpError::TemplateSyntax(_)
+        ));
+    }
+
+    #[test]
+    fn mismatch_error_carries_the_template_and_the_untrimmed_response() {
+        let error = parse_first_value("TEMP=%f DegC", " NOPE ").unwrap_err();
+        match error {
+            AsciiTcpError::ResponseMismatch { template, response } => {
+                assert_eq!(template, "TEMP=%f DegC");
+                assert_eq!(response, " NOPE ");
+            }
+            other => panic!("expected a mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suppressed_text_conversion_is_matched_but_not_captured() {
+        let captures =         parse_response_template("%*s=%f DegC", "TEMP=22.5 DegC").unwrap();
+        assert_eq!(captures.len(), 1);
+                assert_eq!(captures[0].as_f64(), Some(22.5));
     }
 }

@@ -1,9 +1,14 @@
-use crate::{parse_backend_payload, AsciiTcpError, CommandResultPayload, Payload};
+use crate::{parse_backend_payload, AsciiTcpError, Command, CommandResult, CommandResultPayload, Payload};
 
-use super::tcp::ContextInner;
+use super::context_innner::ContextInner;
 use super::ClientConfig;
 
 /// Manages command execution against one or more endpoints with optional retry and connect/disconnect callbacks.
+///
+/// Each `host:port` gets a single persistent connection, opened on first use and shared by every
+/// request (and clones of the `Context`) until it drops, after which the next request reconnects.
+/// A command with an empty `request` sends nothing and only waits for a matching incoming line,
+/// which suits unsolicited heartbeats.
 #[derive(Clone, Default)]
 pub struct Context {
     inner: ContextInner,
@@ -67,6 +72,25 @@ impl Context {
         payload: &Payload,
     ) -> Result<CommandResultPayload, AsciiTcpError> {
         self.inner.execute_payload(payload).await
+    }
+
+    /// Executes one command without retrying, skipping response lines `accept` rejects.
+    ///
+    /// Use when the endpoint interleaves unsolicited lines (banners, heartbeats) with replies.
+    pub async fn execute_command_matching<F>(
+        &self,
+        command: &Command,
+        accept: F,
+    ) -> Result<CommandResult, AsciiTcpError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        self.inner.execute_command_matching(command, accept).await
+    }
+
+    /// Sends one command over the shared connection without waiting for a reply.
+    pub async fn send_command(&self, command: &Command) -> Result<(), AsciiTcpError> {
+        self.inner.send_command(command).await
     }
 
     /// Parses `json` as a payload and executes it, retrying according to `ClientConfig`.

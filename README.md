@@ -84,8 +84,10 @@ server.stop_drop().await?;
 # }
 ```
 
-`Server::start_from_env` builds a `ServerConfig` via `ServerConfig::from_env`, which
-currently reads:
+`ServerContext` owns both the configuration and the request `Handler`
+(`ServerContext::default().with_handler(...)`, then `Server::start(ctx)`); the default
+handler echoes the request. `Server::start_from_env` builds a `ServerContext` via
+`ServerContext::from_env`, which currently reads:
 
 - `ASCII_TCP_SERVER_ADDR` — bind address as `IP:PORT`. Defaults to `127.0.0.1:4000`.
 - `ASCII_TCP_SERVER_IO_TIMEOUT_MS` — defaults to `2000`.
