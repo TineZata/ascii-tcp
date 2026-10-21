@@ -107,6 +107,10 @@ pub struct ResponseTemplate {
 
 impl ResponseTemplate {
     /// Compiles a template, rejecting unsupported or ambiguous patterns.
+    /// Uses printf-style format specifiers to define the expected response pattern.
+    /// Supported conversions are `%d`, `%i`, `%u`, `%f`, `%e`, `%g`, `%x`, `%X`, and `%s`.
+    /// Literal `%` characters are represented as `%%`.
+    /// Adjacent conversions must be separated by some literal text.
     pub fn compile(template: &str) -> Result<Self, AsciiTcpError> {
         let mut segments: Vec<Segment> = Vec::new();
         let mut literal = String::new();
