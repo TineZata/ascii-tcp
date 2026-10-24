@@ -1,19 +1,19 @@
 [package]
 name = "ascii-tcp"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.99"
 description = "Tokio-based ASCII request/response client and server over TCP"
-license = "MPL-2.0"
+license = "MIT"
 keywords = ["tcp", "ascii", "client", "server", "tokio"]
 categories = ["network-programming", "asynchronous"]
 repository = "https://github.com/TineZata/ascii-tcp"
 
 [dependencies]
-tokio = { version = "1", features = ["net", "io-util", "time", "rt", "sync", "macros"] }
-thiserror = "2.0.20"
+tokio = { version = "1.54.1", features = ["net", "io-util", "time", "rt", "sync", "macros"] }
+thiserror = "2.0.21"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = "1.0.154"
 tracing = "0.1"
 
 [dev-dependencies]
